@@ -1,4 +1,4 @@
-{title: PREGHIERA A SANTA MARIA DELLE GRAZIE ALLE FORNACI}
+{title: PREGHIERA A Santa Maria delle Grazie alle Fornaci}
 
 O Maria, Madre dolcissimo, del Verbo incarnato, celeste Patrona di questa famiglia Parrocchiale che da te si denomina,
 volgi il tuo sguardo benevolo verso di noi, tuoi figli, che nelle tue mani e nel tuo cuore deponiamo le nostre aspirazioni.
