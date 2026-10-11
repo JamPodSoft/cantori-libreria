@@ -1,0 +1,121 @@
+name: Proponi pacchetto .cantori
+
+# Avviata dall'app ("I miei brani" -> proponi, su un brano importato da un
+# pacchetto .cantori): un pacchetto (testo, partitura, MIDI...) non sta in
+# un solo avvio, perché GitHub accetta al massimo 65.535 caratteri di
+# input. L'app lo manda quindi in pezzi base64 numerati, tutti con lo
+# stesso `id`: ogni avvio mette il suo pezzo nel ramo `parti-<id>`; quello
+# che trova tutti i pezzi ricompone lo zip in `pacchetti/` e apre la Pull
+# Request, come per i canti. Il token dell'app può solo avviare
+# automazioni: il permesso di scrivere è di questo workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      fileName:
+        description: "Nome del pacchetto (es. Gloria.cantori)"
+        required: true
+      id:
+        description: "Identificativo della proposta, uguale per tutti i pezzi"
+        required: true
+      part:
+        description: "Numero del pezzo (da 1)"
+        required: true
+      parts:
+        description: "Quanti pezzi in tutto"
+        required: true
+      size:
+        description: "Byte del pacchetto ricomposto"
+        required: true
+      data:
+        description: "Il pezzo, in base64"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  part:
+    runs-on: ubuntu-latest
+    env:
+      FILE_NAME: ${{ inputs.fileName }}
+      ID: ${{ inputs.id }}
+      PART: ${{ inputs.part }}
+      PARTS: ${{ inputs.parts }}
+      SIZE: ${{ inputs.size }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Gli input arrivano da un utente dell'app: dati non fidati.
+      - name: Verifica gli input
+        run: |
+          if [[ "$FILE_NAME" == *"/"* || "$FILE_NAME" == *".."* || "$FILE_NAME" != *.cantori ]]; then
+            echo "Nome del pacchetto non valido: $FILE_NAME"; exit 1
+          fi
+          [[ "$ID" =~ ^[a-f0-9]{8,40}$ ]] || { echo "id non valido"; exit 1; }
+          [[ "$PARTS" =~ ^[0-9]{1,3}$ && "$PART" =~ ^[0-9]{1,3}$ && "$SIZE" =~ ^[0-9]{1,9}$ ]] || { echo "numeri non validi"; exit 1; }
+          (( PART >= 1 && PART <= PARTS && PARTS <= 400 )) || { echo "pezzo fuori intervallo"; exit 1; }
+
+      # Il pezzo nel ramo parti-<id>, in una cartella di lavoro a parte. Più
+      # pezzi arrivano insieme: se il push trova il ramo cambiato, si
+      # riparte da quello nuovo (file diversi, nessun conflitto).
+      - name: Mette da parte il pezzo
+        id: piece
+        env:
+          DATA: ${{ inputs.data }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          W="$RUNNER_TEMP/parti"
+          B="parti-$ID"
+          for attempt in $(seq 1 20); do
+            rm -rf "$W"; git worktree prune
+            if git fetch -q origin "$B" 2>/dev/null; then
+              git worktree add -q --detach "$W" FETCH_HEAD
+            else
+              git worktree add -q --detach "$W" HEAD
+              git -C "$W" checkout -q --orphan tmp && git -C "$W" rm -rq --cached . && git -C "$W" clean -fdxq
+            fi
+            mkdir -p "$W/parti"
+            printf '%s' "$DATA" > "$W/parti/$(printf '%04d' "$PART")"
+            git -C "$W" add parti
+            git -C "$W" commit -q -m "Pezzo $PART/$PARTS di $FILE_NAME"
+            if git -C "$W" push -q origin "HEAD:refs/heads/$B"; then
+              echo "count=$(ls "$W/parti" | wc -l)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((RANDOM % 5 + 1))
+          done
+          echo "Impossibile salvare il pezzo"; exit 1
+
+      # Solo l'avvio che ha visto tutti i pezzi va avanti.
+      - name: Ricompone il pacchetto
+        if: steps.piece.outputs.count == inputs.parts
+        run: |
+          W="$RUNNER_TEMP/parti"
+          mkdir -p pacchetti
+          cat "$W"/parti/* | base64 -d > "pacchetti/$FILE_NAME"
+          [ "$(stat -c %s "pacchetti/$FILE_NAME")" = "$SIZE" ] || { echo "Dimensione sbagliata"; exit 1; }
+          unzip -tq "pacchetti/$FILE_NAME"
+          unzip -Z1 "pacchetti/$FILE_NAME" | grep -qi '\.cho$' || { echo "Nel pacchetto manca il .cho"; exit 1; }
+          git worktree remove --force "$W"
+          echo "SLUG=$(echo "${FILE_NAME%.cantori}" | tr -c 'a-zA-Z0-9' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')" >> "$GITHUB_ENV"
+
+      - name: Apre la Pull Request
+        if: steps.piece.outputs.count == inputs.parts
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "Proposta: ${{ inputs.fileName }}"
+          title: "Proposta: ${{ inputs.fileName }}"
+          body: |
+            Pacchetto proposto dall'app Canto e Prego (testo, partitura, MIDI...).
+
+            Controlla il canto prima di fare merge: questa PR non viene unita
+            automaticamente.
+          branch: proposta-pacchetto-${{ env.SLUG }}-${{ inputs.id }}
+          add-paths: pacchetti/${{ inputs.fileName }}
+
+      - name: Cancella i pezzi
+        if: steps.piece.outputs.count == inputs.parts
+        run: git push -q origin --delete "parti-$ID" || true
