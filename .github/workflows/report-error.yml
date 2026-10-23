@@ -6,6 +6,13 @@ name: Segnala errore
 # che può avviare questa automazione (permesso "Actions: write"), mai
 # scrivere direttamente — è questo workflow, con il permesso sulle Issue
 # che GitHub gli fornisce automaticamente, ad aprire la segnalazione.
+#
+# Deduplicazione: prima di aprire una Issue nuova, cerca se ne esiste già
+# una APERTA con lo stesso titolo (stesso errore nella stessa schermata).
+# Se esiste, il nuovo errore viene aggiunto come commento a quella Issue
+# — così i tentativi ripetuti dell'app (es. più "Aggiornamento libreria
+# del coro" falliti di fila) non generano più una Issue ciascuno, e chi
+# gestisce il coro vede tutte le occorrenze in un unico posto.
 on:
   workflow_dispatch:
     inputs:
@@ -29,26 +36,60 @@ jobs:
   create-issue:
     runs-on: ubuntu-latest
     steps:
-      - name: Apri una Issue con l'errore segnalato
+      - name: Apri una Issue con l'errore segnalato (o aggiorna quella esistente)
         uses: actions/github-script@v7
         with:
           script: |
             const { message, context: errorContext, platform } = context.payload.inputs;
+            const title = `Errore nell'app: ${errorContext}`;
+            const dettaglio = [
+              platform ? `Piattaforma: ${platform}` : null,
+              "",
+              "Messaggio:",
+              "",
+              "```",
+              message,
+              "```",
+            ].filter(Boolean).join("\n");
+
+            // Cerca una Issue aperta con lo stesso titolo (le PR condividono
+            // lo stesso endpoint "issues": vanno escluse controllando
+            // pull_request). github.paginate scorre tutte le pagine.
+            const aperte = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+            });
+            const esistente = aperte.find(
+              (i) => !i.pull_request && i.title === title
+            );
+
+            if (esistente) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: esistente.number,
+                body: [
+                  "Nuova occorrenza dello stesso errore:",
+                  "",
+                  dettaglio,
+                ].join("\n"),
+              });
+              core.info(
+                `Errore già segnalato nella Issue #${esistente.number}: aggiunta come commento.`
+              );
+              return;
+            }
+
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Errore nell'app: ${errorContext}`,
+              title,
               body: [
                 "Errore segnalato automaticamente dall'app.",
                 "",
                 `Dove: ${errorContext}`,
-                platform ? `Piattaforma: ${platform}` : null,
-                "",
-                "Messaggio:",
-                "",
-                "```",
-                message,
-                "```",
+                dettaglio,
                 "",
               ].filter(Boolean).join("\n"),
             });
